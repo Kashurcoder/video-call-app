@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>My Video Call</title>
+  <style>
+    body { font-family: sans-serif; background: #111; color: #eee; text-align: center; padding: 20px; }
+    video { width: 40%; margin: 10px; border-radius: 10px; background: #000; }
+    button { padding: 8px 16px; font-size: 14px; margin: 4px; cursor: pointer; border-radius: 6px; border: none; }
+    #memberList { max-width: 320px; margin: 20px auto; text-align: left; }
+    .member-row {
+      display: flex; align-items: center; justify-content: space-between;
+      background: #1e1e1e; padding: 10px 14px; margin-bottom: 8px; border-radius: 8px;
+    }
+    .dot { height: 10px; width: 10px; border-radius: 50%; background: #2ecc71; display: inline-block; margin-right: 8px; }
+    .call-btn { background: #2ecc71; color: #111; font-weight: bold; }
+    .name-entry { margin-bottom: 20px; }
+    input { padding: 8px; font-size: 14px; border-radius: 6px; border: none; margin-right: 8px; }
+  </style>
+</head>
+<body>
+
+  <h2>Video Call</h2>
+
+  <div id="nameEntry" class="name-entry">
+    <input id="nameInput" type="text" placeholder="Enter your name">
+    <button id="joinBtn" style="background:#2ecc71;color:#111;font-weight:bold;">Join</button>
+  </div>
+
+  <div id="callArea" style="display:none;">
+    <h3>Who's online</h3>
+    <div id="memberList"></div>
+
+    <div>
+      <video id="localVideo" autoplay muted playsinline></video>
+      <video id="remoteVideo" autoplay playsinline></video>
+    </div>
+    <div id="callStatus" style="margin-top:10px; color:#aaa;"></div>
+  </div>
+
+  <script>
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+
+    const nameEntry = document.getElementById('nameEntry');
+    const nameInput = document.getElementById('nameInput');
+    const joinBtn = document.getElementById('joinBtn');
+    const callArea = document.getElementById('callArea');
+    const memberListDiv = document.getElementById('memberList');
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const callStatus = document.getElementById('callStatus');
+
+    let myId = null;
+    let myName = null;
+    let localStream = null;
+    let peerConnection = null;
+    let currentCallTarget = null; // the id of the person we're in a call with
+
+    const config = {
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    };
+
+    joinBtn.onclick = async () => {
+      const name = nameInput.value.trim();
+      if (!name) return;
+      myName = name;
+
+      // Get camera/mic ready ahead of time so calls connect faster
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localVideo.srcObject = localStream;
+
+      ws.send(JSON.stringify({ type: "join", name: myName }));
+
+      nameEntry.style.display = "none";
+      callArea.style.display = "block";
+    };
+
+    ws.onmessage = async (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.type === "your_id") {
+        myId = data.id;
+        return;
+      }
+
+      if (data.type === "member_list") {
+        renderMembers(data.members);
+        return;
+      }
+
+      if (data.type === "offer") {
+        currentCallTarget = data.from;
+        callStatus.textContent = `Incoming call... connecting`;
+        await ensurePeerConnection();
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        ws.send(JSON.stringify({ ...answer, to: currentCallTarget }));
+      } else if (data.type === "answer") {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
+        callStatus.textContent = `Connected`;
+      } else if (data.type === "candidate") {
+        try {
+          await peerConnection.addIceCandidate(data.candidate);
+        } catch (e) {
+          console.error("Error adding ICE candidate", e);
+        }
+      }
+    };
+
+    function renderMembers(members) {
+      memberListDiv.innerHTML = "";
+
+      members.forEach(member => {
+        const row = document.createElement('div');
+        row.className = 'member-row';
+
+        const isMe = member.id === myId;
+        const left = document.createElement('span');
+        left.innerHTML = `<span class="dot"></span>${member.name}${isMe ? " (you)" : ""}`;
+        row.appendChild(left);
+
+        // Don't show a call button next to yourself
+        if (!isMe) {
+          const btn = document.createElement('button');
+          btn.className = 'call-btn';
+          btn.textContent = 'Call';
+          btn.onclick = () => startCall(member.id);
+          row.appendChild(btn);
+        }
+
+        memberListDiv.appendChild(row);
+      });
+    }
+
+    async function ensurePeerConnection() {
+      if (peerConnection) return;
+
+      peerConnection = new RTCPeerConnection(config);
+
+      localStream.getTracks().forEach(track => {
+        peerConnection.addTrack(track, localStream);
+      });
+
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate && currentCallTarget) {
+          ws.send(JSON.stringify({ type: "candidate", candidate: event.candidate, to: currentCallTarget }));
+        }
+      };
+
+      peerConnection.ontrack = (event) => {
+        remoteVideo.srcObject = event.streams[0];
+      };
+    }
+
+    async function startCall(targetId) {
+      currentCallTarget = targetId;
+      callStatus.textContent = `Calling...`;
+
+      await ensurePeerConnection();
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+      ws.send(JSON.stringify({ ...offer, to: targetId }));
+    }
+  </script>
+</body>
+</html>
