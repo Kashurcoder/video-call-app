@@ -4,7 +4,7 @@ import os
 import uuid
 from aiohttp import web, WSMsgType
 
-# clients: { client_id: {"ws": websocket, "name": "Alice"} }
+# clients: { client_id: {"ws": websocket, "name": "Alice", "status": "available"} }
 clients = {}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -12,8 +12,10 @@ INDEX_PATH = os.path.join(BASE_DIR, "index.html")
 
 
 def get_member_list():
-    # Sends everyone's id + name to all clients, so they can render the list
-    return [{"id": cid, "name": info["name"]} for cid, info in clients.items()]
+    return [
+        {"id": cid, "name": info["name"], "status": info["status"]}
+        for cid, info in clients.items()
+    ]
 
 
 async def broadcast_member_list():
@@ -35,19 +37,28 @@ async def websocket_handler(request):
                 continue
 
             data = json.loads(msg.data)
+            msg_type = data.get("type")
 
-            if data.get("type") == "join":
-                # First message a client sends: their chosen name
-                clients[client_id] = {"ws": ws, "name": data.get("name", "Unknown")}
+            if msg_type == "join":
+                clients[client_id] = {
+                    "ws": ws,
+                    "name": data.get("name", "Unknown"),
+                    "status": "available",
+                }
                 print(f"{clients[client_id]['name']} joined. Total: {len(clients)}")
-                # Tell this client their own assigned id, so the page can
-                # tell itself apart from everyone else in the member list
                 await ws.send_str(json.dumps({"type": "your_id", "id": client_id}))
                 await broadcast_member_list()
                 continue
 
-            # Every other message (offer/answer/candidate) should be routed
-            # ONLY to the specific person it's meant for, using "to"
+            if msg_type == "status":
+                # Client telling us they're now in a call, or free again
+                if client_id in clients:
+                    clients[client_id]["status"] = data.get("status", "available")
+                    await broadcast_member_list()
+                continue
+
+            # offer / answer / candidate / hangup all get routed straight
+            # to the specific person they're meant for
             target_id = data.get("to")
             if target_id and target_id in clients:
                 data["from"] = client_id
@@ -71,6 +82,7 @@ app.router.add_get('/', index_handler)
 app.router.add_get('/ws', websocket_handler)
 
 if __name__ == "__main__":
-    print("Combined server running on http://0.0.0.0:8000")
+    port = int(os.environ.get("PORT", 8000))
+    print(f"Combined server running on http://0.0.0.0:{port}")
     print("WebSocket endpoint at /ws")
-    web.run_app(app, host="0.0.0.0", port=8000)
+    web.run_app(app, host="0.0.0.0", port=port)
